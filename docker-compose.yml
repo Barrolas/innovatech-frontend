@@ -1,0 +1,16 @@
+services:
+  frontend:
+    build:
+      context: .
+      args:
+        VITE_API_VENTAS_URL: ${VITE_API_VENTAS_URL:-}
+        VITE_API_DESPACHOS_URL: ${VITE_API_DESPACHOS_URL:-}
+    container_name: innovatech-frontend
+    restart: unless-stopped
+    environment:
+      VENTAS_UPSTREAM: ${VENTAS_UPSTREAM:-http://host.docker.internal:9080}
+      DESPACHOS_UPSTREAM: ${DESPACHOS_UPSTREAM:-http://host.docker.internal:9081}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${FRONT_HOST_PORT:-9082}:80"

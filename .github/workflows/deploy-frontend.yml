@@ -1,0 +1,53 @@
+name: Deploy Frontend to EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'nginx.conf.template'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+      - '.github/workflows/deploy-frontend.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Desplegar en EC2 Frontend vía SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.FRONTEND_IP }}
+          username: ec2-user
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+
+            APP_DIR="$HOME/innovatech-frontend"
+            ENV_BACKUP="$HOME/.innovatech-frontend.env.bak"
+
+            if [ -f "$APP_DIR/.env" ]; then
+              cp "$APP_DIR/.env" "$ENV_BACKUP"
+            fi
+
+            rm -rf "$APP_DIR"
+            git clone https://github.com/${{ github.repository }}.git "$APP_DIR"
+            cd "$APP_DIR"
+
+            if [ -f "$ENV_BACKUP" ]; then
+              cp "$ENV_BACKUP" .env
+            elif [ ! -f .env ]; then
+              echo "ERROR: No existe .env en EC2. Ejecuta scripts/ec2-env-setup.sh antes del deploy."
+              exit 1
+            fi
+
+            docker compose down || true
+            docker compose up -d --build

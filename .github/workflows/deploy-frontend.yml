@@ -1,0 +1,81 @@
+name: Deploy Frontend to EC2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'nginx.conf.template'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.js'
+      - '.github/workflows/deploy-frontend.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Desplegar en EC2 Frontend vía SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.FRONTEND_IP }}
+          username: ec2-user
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+
+            APP_DIR="$HOME/innovatech-frontend"
+            ENV_BACKUP="$HOME/.innovatech-frontend.env.bak"
+
+            if [ -f "$APP_DIR/.env" ]; then
+              cp "$APP_DIR/.env" "$ENV_BACKUP"
+            fi
+
+            rm -rf "$APP_DIR"
+            git clone https://github.com/${{ github.repository }}.git "$APP_DIR"
+            cd "$APP_DIR"
+
+            if [ -f "$ENV_BACKUP" ]; then
+              cp "$ENV_BACKUP" .env
+            fi
+
+            if [ -f .env ]; then
+              set -a
+              . ./.env
+              set +a
+            fi
+
+            VENTAS_UPSTREAM="${VENTAS_UPSTREAM:-${{ secrets.VENTAS_UPSTREAM }}}"
+            DESPACHOS_UPSTREAM="${DESPACHOS_UPSTREAM:-${{ secrets.DESPACHOS_UPSTREAM }}}"
+            FRONT_HOST_PORT="${FRONT_HOST_PORT:-80}"
+            VITE_API_VENTAS_URL="${VITE_API_VENTAS_URL:-}"
+            VITE_API_DESPACHOS_URL="${VITE_API_DESPACHOS_URL:-}"
+
+            if [ -z "$VENTAS_UPSTREAM" ] || [ -z "$DESPACHOS_UPSTREAM" ]; then
+              echo "ERROR: Configura VENTAS_UPSTREAM y DESPACHOS_UPSTREAM en .env o GitHub Secrets."
+              exit 1
+            fi
+
+            docker compose down || true
+            docker stop frontend-app || true
+            docker rm frontend-app || true
+
+            docker build \
+              --build-arg VITE_API_VENTAS_URL="$VITE_API_VENTAS_URL" \
+              --build-arg VITE_API_DESPACHOS_URL="$VITE_API_DESPACHOS_URL" \
+              -t frontend-image .
+
+            docker run -d \
+              --name frontend-app \
+              -p "${FRONT_HOST_PORT}:80" \
+              -e VENTAS_UPSTREAM="$VENTAS_UPSTREAM" \
+              -e DESPACHOS_UPSTREAM="$DESPACHOS_UPSTREAM" \
+              --restart unless-stopped \
+              frontend-image

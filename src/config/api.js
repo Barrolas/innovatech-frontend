@@ -5,12 +5,12 @@ const resolveBase = (envValue, fallback) => {
 
 export const API_VENTAS_BASE = resolveBase(
   import.meta.env.VITE_API_VENTAS_URL,
-  "http://localhost:9080"
+  "http://localhost:8080"
 );
 
 export const API_DESPACHOS_BASE = resolveBase(
   import.meta.env.VITE_API_DESPACHOS_URL,
-  "http://localhost:9081"
+  "http://localhost:8081"
 );
 
 export const ventasApi = (path = "") => {

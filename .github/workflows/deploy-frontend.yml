@@ -4,21 +4,27 @@ on:
   push:
     branches: [deploy]
     paths:
-      - 'src/**'
-      - 'public/**'
-      - 'Dockerfile'
-      - 'docker-compose.yml'
-      - 'nginx.conf.template'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'vite.config.js'
-      - '.github/workflows/deploy-frontend.yml'
+      - "src/**"
+      - "public/**"
+      - "Dockerfile"
+      - "nginx.conf.template"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.js"
+      - ".github/workflows/deploy-frontend.yml"
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+
     outputs:
       ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+
+    env:
+      BUILD_CONTEXT: .
+      VITE_API_VENTAS_URL: ${{ secrets.VITE_API_VENTAS_URL }}
+      VITE_API_DESPACHOS_URL: ${{ secrets.VITE_API_DESPACHOS_URL }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,100 +41,120 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Debug ECR config
-        run: |
-          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}"
-          echo "AWS_REGION=${{ secrets.AWS_REGION }}"
-          echo "ECR_REPOSITORY_VENTAS=${{ secrets.ECR_REPOSITORY_VENTAS }}"
-          echo "ECR_REPOSITORY_DESPACHOS=${{ secrets.ECR_REPOSITORY_DESPACHOS }}"
-
-      - name: Build and push Ventas image
+      - name: Build and push frontend image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_VENTAS }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+          docker build \
+            --build-arg VITE_API_VENTAS_URL="$VITE_API_VENTAS_URL" \
+            --build-arg VITE_API_DESPACHOS_URL="$VITE_API_DESPACHOS_URL" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
-            ./back-Ventas_SpringBoot/Springboot-API-REST
+            "$BUILD_CONTEXT"
+
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-
-      - name: Build and push Despachos image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_DESPACHOS }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
-            ./back-Despachos_SpringBoot/Springboot-API-REST-DESPACHO
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout del código
-        uses: actions/checkout@v4
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
 
-      - name: Desplegar en EC2 Frontend vía SSH
-        uses: appleboy/ssh-action@v1.0.3
+      ECR_REGISTRY_FROM_BUILD: ${{ needs.build-and-push.outputs.ecr_registry }}
+      ECR_REGISTRY_SECRET: ${{ secrets.ECR_REGISTRY }}
+      ECR_REPOSITORY_FRONTEND: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
+
+      FRONT_HOST_PORT: ${{ secrets.FRONT_HOST_PORT }}
+      VENTAS_UPSTREAM: ${{ secrets.VENTAS_UPSTREAM }}
+      DESPACHOS_UPSTREAM: ${{ secrets.DESPACHOS_UPSTREAM }}
+
+    steps:
+      - name: Deploy frontend on EC2
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.FRONTEND_IP }}
           username: ec2-user
           key: ${{ secrets.SSH_KEY }}
+
+          envs: AWS_REGION,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_SESSION_TOKEN,ECR_REGISTRY_FROM_BUILD,ECR_REGISTRY_SECRET,ECR_REPOSITORY_FRONTEND,FRONT_HOST_PORT,VENTAS_UPSTREAM,DESPACHOS_UPSTREAM
+
           script: |
-            set -e
+            set -euo pipefail
 
-            APP_DIR="$HOME/innovatech-frontend"
-            ENV_BACKUP="$HOME/.innovatech-frontend.env.bak"
-
-            if [ -f "$APP_DIR/.env" ]; then
-              cp "$APP_DIR/.env" "$ENV_BACKUP"
-            fi
-
-            rm -rf "$APP_DIR"
-            git clone https://github.com/${{ github.repository }}.git "$APP_DIR"
+            APP_DIR="$HOME/app/innovatech-frontend"
+            mkdir -p "$APP_DIR"
             cd "$APP_DIR"
 
-            if [ -f "$ENV_BACKUP" ]; then
-              cp "$ENV_BACKUP" .env
+            if ! command -v docker >/dev/null 2>&1; then
+              sudo yum install -y docker || sudo dnf install -y docker
+              sudo systemctl enable --now docker
             fi
 
-            if [ -f .env ]; then
-              set -a
-              . ./.env
-              set +a
+            if ! command -v aws >/dev/null 2>&1; then
+              sudo yum install -y awscli || sudo dnf install -y awscli
             fi
 
-            VENTAS_UPSTREAM="${VENTAS_UPSTREAM:-${{ secrets.VENTAS_UPSTREAM }}}"
-            DESPACHOS_UPSTREAM="${DESPACHOS_UPSTREAM:-${{ secrets.DESPACHOS_UPSTREAM }}}"
-            FRONT_HOST_PORT="${FRONT_HOST_PORT:-80}"
-            VITE_API_VENTAS_URL="${VITE_API_VENTAS_URL:-}"
-            VITE_API_DESPACHOS_URL="${VITE_API_DESPACHOS_URL:-}"
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              sudo curl -SL \
+                https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            fi
 
-            if [ -z "$VENTAS_UPSTREAM" ] || [ -z "$DESPACHOS_UPSTREAM" ]; then
-              echo "ERROR: Configura VENTAS_UPSTREAM y DESPACHOS_UPSTREAM en .env o GitHub Secrets."
+            ECR_REGISTRY="${ECR_REGISTRY_FROM_BUILD:-${ECR_REGISTRY_SECRET:-}}"
+
+            if [ -z "$ECR_REGISTRY" ]; then
+              AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            fi
+
+            if [ -z "${VENTAS_UPSTREAM:-}" ] || [ -z "${DESPACHOS_UPSTREAM:-}" ]; then
+              echo "ERROR: VENTAS_UPSTREAM and DESPACHOS_UPSTREAM are required."
               exit 1
             fi
 
-            docker compose down || true
-            docker stop frontend-app || true
-            docker rm frontend-app || true
+            {
+              printf 'FRONT_HOST_PORT=%s\n' "${FRONT_HOST_PORT:-80}"
+              printf 'VENTAS_UPSTREAM=%s\n' "$VENTAS_UPSTREAM"
+              printf 'DESPACHOS_UPSTREAM=%s\n' "$DESPACHOS_UPSTREAM"
+              printf 'ECR_REGISTRY=%s\n' "$ECR_REGISTRY"
+              printf 'ECR_REPOSITORY_FRONTEND=%s\n' "$ECR_REPOSITORY_FRONTEND"
+            } > .env
 
-            docker build \
-              --build-arg VITE_API_VENTAS_URL="$VITE_API_VENTAS_URL" \
-              --build-arg VITE_API_DESPACHOS_URL="$VITE_API_DESPACHOS_URL" \
-              -t frontend-image .
+            cat > docker-compose.prod.yml <<'EOF'
+            services:
+              frontend:
+                image: ${ECR_REGISTRY}/${ECR_REPOSITORY_FRONTEND}:latest
+                container_name: innovatech-frontend
+                restart: unless-stopped
+                environment:
+                  VENTAS_UPSTREAM: ${VENTAS_UPSTREAM}
+                  DESPACHOS_UPSTREAM: ${DESPACHOS_UPSTREAM}
+                extra_hosts:
+                  
+            "host.docker.internal:host-gateway"
+              ports:
+            "${FRONT_HOST_PORT:-80}:80"
+            EOF
 
-            docker run -d \
-              --name frontend-app \
-              -p "${FRONT_HOST_PORT}:80" \
-              -e VENTAS_UPSTREAM="$VENTAS_UPSTREAM" \
-              -e DESPACHOS_UPSTREAM="$DESPACHOS_UPSTREAM" \
-              --restart unless-stopped \
-              frontend-image
+            rm -f "$HOME/.docker/config.json"
+            sudo rm -f /root/.docker/config.json || true
+
+            aws ecr get-login-password --region "$AWS_REGION" \
+              | sudo docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+            sudo docker stop frontend-app || true
+            sudo docker rm frontend-app || true
+
+            sudo docker compose -f docker-compose.prod.yml pull
+            sudo docker compose -f docker-compose.prod.yml up -d
+
+            sudo docker ps
